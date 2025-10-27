@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use macaddr::MacAddr6;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 pub struct StreamId;
 
@@ -93,15 +93,61 @@ pub enum TimingProtocol {
     },
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "type")]
 pub enum StreamRequest {
-    #[serde(rename = 96)]
+    // #[serde(rename = "96")]
     AudioRealtime(AudioRealtimeRequest),
-    #[serde(rename = 103)]
+    // #[serde(rename = "103")]
     AudioBuffered(AudioBufferedRequest),
-    #[serde(rename = 110)]
+    // #[serde(rename = "110")]
     Video(VideoRequest),
+}
+
+impl<'de> Deserialize<'de> for StreamRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = plist::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
+
+        // Ensure the value is a dictionary
+        let dict = value.as_dictionary().ok_or_else(|| {
+            serde::de::Error::custom("Expected a dictionary at the root of the plist")
+        })?;
+
+        // Extract the "type" field as a number
+        let type_value = dict
+            .get("type")
+            .ok_or_else(|| serde::de::Error::missing_field("type"))?;
+
+        let type_num = type_value
+            .as_unsigned_integer()
+            .ok_or_else(|| serde::de::Error::custom("'type' must be an integer"))?;
+
+        match type_num {
+            96 => {
+                let inner: AudioRealtimeRequest =
+                    plist::from_value(&value).map_err(serde::de::Error::custom)?;
+
+                Ok(Self::AudioRealtime(inner))
+            }
+
+            103 => {
+                let inner: AudioBufferedRequest =
+                    plist::from_value(&value).map_err(serde::de::Error::custom)?;
+
+                Ok(Self::AudioBuffered(inner))
+            }
+
+            110 => {
+                let inner: VideoRequest =
+                    plist::from_value(&value).map_err(serde::de::Error::custom)?;
+
+                Ok(Self::Video(inner))
+            }
+
+            other => Err(serde::de::Error::custom(format!("unknown type: {other}"))),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -164,34 +210,83 @@ pub enum SetupResponse {
     },
 }
 
-#[derive(Serialize)]
-#[serde(tag = "type")]
+#[derive(Debug)]
 pub enum StreamResponse {
-    #[serde(rename = 96)]
     AudioRealtime {
-        #[serde(rename = "streamID")]
         id: u64,
-        #[serde(rename = "dataPort")]
         local_data_port: u16,
-        #[serde(rename = "controlPort")]
         local_control_port: u16,
     },
-    #[serde(rename = 103)]
     AudioBuffered {
-        #[serde(rename = "streamID")]
         id: u64,
-        #[serde(rename = "dataPort")]
         local_data_port: u16,
-        #[serde(rename = "audioBufferSize")]
         audio_buffer_size: u32,
     },
-    #[serde(rename = 110)]
     Video {
-        #[serde(rename = "streamID")]
         id: u64,
-        #[serde(rename = "dataPort")]
         local_data_port: u16,
     },
+}
+
+impl Serialize for StreamResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct AdjTagged {
+            #[serde(rename = "type")]
+            type_: u8,
+            #[serde(rename = "streamID")]
+            id: u64,
+            #[serde(rename = "dataPort")]
+            local_data_port: u16,
+            #[serde(rename = "controlPort")]
+            local_control_port: Option<u16>,
+
+            #[serde(rename = "audioBufferSize")]
+            audio_buffer_size: Option<u32>,
+        }
+
+        match self {
+            Self::AudioRealtime {
+                id,
+                local_data_port,
+                local_control_port,
+            } => AdjTagged {
+                type_: 96,
+                id: *id,
+                local_data_port: *local_data_port,
+                local_control_port: Some(*local_control_port),
+                audio_buffer_size: None,
+            }
+            .serialize(serializer),
+            Self::AudioBuffered {
+                id,
+                local_data_port,
+                audio_buffer_size,
+            } => AdjTagged {
+                type_: 103,
+                id: *id,
+                local_data_port: *local_data_port,
+                audio_buffer_size: Some(*audio_buffer_size),
+                local_control_port: None,
+            }
+            .serialize(serializer),
+
+            Self::Video {
+                id,
+                local_data_port,
+            } => AdjTagged {
+                type_: 110,
+                id: *id,
+                local_data_port: *local_data_port,
+                audio_buffer_size: None,
+                local_control_port: None,
+            }
+            .serialize(serializer),
+        }
+    }
 }
 
 #[derive(Deserialize)]
